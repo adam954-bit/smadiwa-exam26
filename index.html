@@ -865,33 +865,20 @@
             defaultRadiusMeters: 200
         };
 
-        // GANTI NILAI DI BAWAH INI DENGAN KONFIGURASI FIREBASE PROJECT ANDA SAAT UPLOAD KE GITHUB
+        // Konfigurasi Firebase Project: smadiwa-exam-cbt
         const MANUAL_FIREBASE_CONFIG = {
-            apiKey: "ISI_API_KEY_FIREBASE_ANDA",
-            authDomain: "ISI_PROJECT_ID.firebaseapp.com",
-            projectId: "ISI_PROJECT_ID",
-            storageBucket: "ISI_PROJECT_ID.appspot.com",
-            messagingSenderId: "ISI_MESSAGING_SENDER_ID",
-            appId: "ISI_APP_ID"
+            apiKey: "AIzaSyCYyVyuFe-PI49cNPRyNL4N94GzBz22fZY",
+            authDomain: "smadiwa-exam-cbt.firebaseapp.com",
+            databaseURL: "https://smadiwa-exam-cbt-default-rtdb.asia-southeast1.firebasedatabase.app",
+            projectId: "smadiwa-exam-cbt",
+            storageBucket: "smadiwa-exam-cbt.firebasestorage.app",
+            messagingSenderId: "751542060642",
+            appId: "1:751542060642:web:a23786e97fef4bbf01333b",
+            measurementId: "G-045WM79P00"
         };
 
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'smadiwa-exam-cbt-2026';
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'smadiwa-exam-cbt';
         let db = null;
         let auth = null;
         let currentUser = null;
-// ... existing code ... -->
-        async function initCloudDatabase() {
-            try {
-                // Gunakan konfigurasi otomatis lingkungan jika ada, atau gunakan MANUAL_FIREBASE_CONFIG untuk GitHub Pages
-                const firebaseConfig = (typeof __firebase_config !== 'undefined')
-                    ? JSON.parse(__firebase_config)
-                    : MANUAL_FIREBASE_CONFIG;
-
-                if (!firebaseConfig || !firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('ISI_')) {
-                    throw new Error('Konfigurasi Firebase belum diisi pada MANUAL_FIREBASE_CONFIG.');
-                }
-
-                const app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                auth = getAuth(app);
 // ... existing code ... -->
