@@ -88,6 +88,17 @@
             background: inherit;
             animation: pulse-ring 1.8s infinite;
         }
+
+        /* Anti-Print & Anti-Screenshot Deterrent */
+        @media print {
+            body {
+                display: none !important;
+            }
+        }
+        .anti-capture-veil {
+            filter: blur(22px) brightness(0.3);
+            transition: filter 0.1s ease;
+        }
     </style>
 </head>
 <body class="text-slate-800 flex flex-col justify-between antialiased">
@@ -175,7 +186,7 @@
                             </div>
                             <div>
                                 <p class="font-semibold text-white">Kunci Lokasi GPS Sekolah</p>
-                                <p class="text-xs text-blue-200/75">Koordinat: -7.3654442, 109.8978844 (Radius maksimal 250m dari sekolah).</p>
+                                <p id="login-radius-desc" class="text-xs text-blue-200/75">Koordinat: -7.3654442, 109.8978844 (Radius maksimal 200m dari sekolah).</p>
                             </div>
                         </div>
 
@@ -402,8 +413,13 @@
                     </div>
                 </div>
 
+                <!-- Dynamic Anti-Screenshot Watermark Overlay (Pointer-events-none so student can click Google Form) -->
+                <div id="exam-watermark-layer" class="pointer-events-none fixed inset-0 z-40 overflow-hidden opacity-[0.07] select-none flex flex-wrap items-center justify-center gap-12 p-6 rotate-[-18deg] scale-125">
+                    <!-- Watermark items injected dynamically -->
+                </div>
+
                 <!-- Google Form Iframe -->
-                <iframe id="google-form-iframe" src="about:blank" class="w-full flex-grow border-0" allowfullscreen>
+                <iframe id="google-form-iframe" src="about:blank" class="w-full flex-grow border-0 relative z-10" allowfullscreen>
                     Memuat formulir ujian...
                 </iframe>
             </div>
@@ -448,13 +464,16 @@
                     <div class="space-y-3">
                         <div class="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 font-medium">
                             <i class="fa-solid fa-user-shield mr-1.5 text-amber-600"></i>
-                            Silakan angkat tangan dan lapor kepada <strong>Pengawas / Admin Ujian</strong> agar akses ujian Anda dibuka kembali.
+                            Minta <strong>Pengawas / Superadmin</strong> membuka kunci akun Anda, lalu masukkan <strong>Token Terbaru</strong> di bawah ini.
                         </div>
+
+                        <input type="text" id="unlock-token-input" maxlength="8" placeholder="MASUKKAN TOKEN TERBARU"
+                            class="w-full px-4 py-3 rounded-xl border-2 border-blue-300 focus:border-blue-600 outline-none font-mono text-center text-base font-bold tracking-widest uppercase text-slate-900 bg-slate-50">
 
                         <button onclick="checkUnlockStatusFromAdmin()"
                             class="w-full py-3.5 px-5 rounded-2xl bg-blue-700 hover:bg-blue-600 text-white font-bold text-sm shadow-lg transition flex items-center justify-center gap-2 cursor-pointer">
-                            <i class="fa-solid fa-arrows-rotate"></i>
-                            <span>Cek Status Pembukaan Kunci dari Admin</span>
+                            <i class="fa-solid fa-lock-open"></i>
+                            <span>Verifikasi Pembukaan Kunci & Token</span>
                         </button>
                     </div>
                 </div>
@@ -558,9 +577,20 @@
 
                     <!-- Quick Info Banner inside Stats Grid -->
                     <div class="col-span-2 sm:col-span-4 glass-dark text-white rounded-2xl px-5 py-3.5 flex flex-wrap items-center justify-between gap-3">
-                        <div class="flex items-center gap-2.5 text-xs">
-                            <i class="fa-solid fa-location-crosshairs text-blue-400 text-base"></i>
-                            <span>Geofencing Aktif: <strong>SMA Muhammadiyah Wonosobo</strong> (-7.3654442, 109.8978844)</span>
+                        <div class="flex flex-wrap items-center gap-3 text-xs">
+                            <div class="flex items-center gap-2">
+                                <i class="fa-solid fa-location-crosshairs text-blue-400 text-base"></i>
+                                <span>Geofencing: <strong>SMA Muhammadiyah Wonosobo</strong> (-7.3654442, 109.8978844)</span>
+                            </div>
+                            <div class="flex items-center gap-1.5 bg-blue-950/90 px-2.5 py-1 rounded-xl border border-blue-400/30">
+                                <label for="admin-radius-input" class="text-blue-200 font-semibold">Radius (m):</label>
+                                <input type="number" id="admin-radius-input" min="50" max="5000" step="10" value="200"
+                                    class="w-16 px-1.5 py-0.5 rounded bg-slate-900 border border-blue-500/40 text-white font-mono font-bold text-center outline-none">
+                                <button onclick="saveSchoolRadiusSetting()"
+                                    class="px-2 py-0.5 rounded bg-blue-600 hover:bg-blue-500 text-white font-bold transition cursor-pointer">
+                                    Simpan
+                                </button>
+                            </div>
                         </div>
                         <button onclick="simulateStudentViolationDemo()"
                             class="px-3 py-1.5 rounded-xl bg-rose-600/80 hover:bg-rose-600 text-white text-xs font-semibold transition cursor-pointer">
@@ -610,10 +640,20 @@
                             <option value="FINISHED">Selesai</option>
                         </select>
 
+                        <!-- Filter Jenjang -->
+                        <select id="admin-filter-jenjang" onchange="renderAdminStudentsTable()"
+                            class="px-3 py-2 rounded-xl border border-slate-300 text-xs font-bold text-slate-700 bg-white outline-none focus:border-blue-600">
+                            <option value="ALL">Semua Jenjang</option>
+                            <option value="Kelas X">Kelas X</option>
+                            <option value="Kelas XI">Kelas XI</option>
+                            <option value="Kelas XII">Kelas XII</option>
+                        </select>
+
                         <!-- Sort By -->
                         <select id="admin-sort-by" onchange="renderAdminStudentsTable()"
                             class="px-3 py-2 rounded-xl border border-blue-300 bg-blue-50 text-xs font-bold text-blue-900 outline-none focus:border-blue-600">
                             <option value="VIOLATION_DESC">Sort: Pelanggaran & Terkunci Teratas</option>
+                            <option value="VIOLATION_COUNT">Sort: Jumlah Pelanggaran Terbanyak</option>
                             <option value="TIME_DESC">Sort: Aktivitas Terbaru</option>
                             <option value="NAME_ASC">Sort: Nama Peserta (A - Z)</option>
                             <option value="JENJANG_ASC">Sort: Jenjang / Kelas</option>
@@ -806,16 +846,17 @@
         const SCHOOL_COORDS = {
             lat: -7.3654442,
             lng: 109.8978844,
-            maxRadiusMeters: 250 // Radius toleransi area sekolah (250 meter)
+            defaultRadiusMeters: 200 // Default radius toleransi area sekolah (meter)
         };
 
         const STORAGE_KEYS = {
             SESSIONS: 'smadiwa_cbt_sessions_v1',
             STUDENTS: 'smadiwa_cbt_students_v1',
-            TOKEN: 'smadiwa_cbt_token_v1'
+            TOKEN: 'smadiwa_cbt_token_v1',
+            SETTINGS: 'smadiwa_cbt_settings_v1'
         };
 
-        // Application Runtime State
+        // Global Runtime State
         let geoState = {
             verified: false,
             simulated: false,
@@ -823,17 +864,38 @@
             currentLat: null,
             currentLng: null
         };
-
-        let activeStudentExam = null; // Holds currently logged-in student record
+        let isAdminLoggedIn = false;
+        let activeStudentExam = null;
         let examTimerInterval = null;
         let tokenTimerInterval = null;
-        let isAdminLoggedIn = false;
 
-        // ==========================================
-        // 2. INITIALIZATION & DEFAULT DATA SEEDING
-        // ==========================================
+        function getSchoolRadius() {
+            const settings = JSON.parse(localStorage.getItem(STORAGE_KEYS.SETTINGS) || '{}');
+            return Number(settings.radiusMeters) || SCHOOL_COORDS.defaultRadiusMeters;
+        }
+
+        function saveSchoolRadiusSetting() {
+            const val = parseInt(document.getElementById('admin-radius-input').value, 10);
+            if (isNaN(val) || val < 20) {
+                showToast('Radius Tidak Valid', 'Masukkan jarak radius minimal 20 meter.', 'error');
+                return;
+            }
+            localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify({ radiusMeters: val }));
+            updateRadiusLabels();
+            checkRealGeolocation();
+            showToast('Radius Diperbarui', `Batas area GPS sekolah diatur ke ${val} meter.`, 'success');
+        }
+
+        function updateRadiusLabels() {
+            const rad = getSchoolRadius();
+            const descEl = document.getElementById('login-radius-desc');
+            const adminInput = document.getElementById('admin-radius-input');
+            if (descEl) descEl.textContent = `Koordinat: -7.3654442, 109.8978844 (Radius maksimal ${rad}m dari sekolah).`;
+            if (adminInput) adminInput.value = rad;
+        }
         window.addEventListener('DOMContentLoaded', () => {
             initDefaultData();
+            updateRadiusLabels();
             startHeaderClock();
             checkRealGeolocation();
             populateAvailableSessions();
@@ -852,6 +914,10 @@
                 }
                 if (e.key === STORAGE_KEYS.TOKEN) {
                     updateAdminTokenDisplay();
+                }
+                if (e.key === STORAGE_KEYS.SETTINGS) {
+                    updateRadiusLabels();
+                    checkRealGeolocation();
                 }
             });
         });
@@ -1062,7 +1128,7 @@
                     geoState.currentLat = userLat;
                     geoState.currentLng = userLng;
                     geoState.distanceMeters = distance;
-                    geoState.verified = distance <= SCHOOL_COORDS.maxRadiusMeters;
+                    geoState.verified = distance <= getSchoolRadius();
                     updateGeoUI();
                 },
                 (err) => {
@@ -1109,10 +1175,11 @@
                 accessBadge.textContent = 'Diizinkan (SMA Muh Wonosobo)';
                 accessBadge.className = 'px-2 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 font-semibold';
             } else {
+                const maxRad = getSchoolRadius();
                 navBadge.className = 'flex items-center gap-2 px-3 py-1.5 rounded-xl bg-rose-500/20 border border-rose-400/40 text-rose-200 text-xs font-semibold cursor-pointer';
                 const distLabel = geoState.distanceMeters !== null ? `${(geoState.distanceMeters / 1000).toFixed(2)} km` : 'Tidak Terdeteksi';
                 navText.textContent = `Di Luar Area (${distLabel})`;
-                distText.textContent = geoState.distanceMeters !== null ? `${geoState.distanceMeters.toLocaleString('id-ID')} meter (Maks 250m)` : 'GPS Tidak Aktif';
+                distText.textContent = geoState.distanceMeters !== null ? `${geoState.distanceMeters.toLocaleString('id-ID')} meter (Maks ${maxRad}m)` : 'GPS Tidak Aktif';
                 distText.className = 'font-mono font-bold text-rose-400';
                 accessBadge.textContent = 'Diblokir (Di Luar Sekolah)';
                 accessBadge.className = 'px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-300 font-semibold';
@@ -1384,6 +1451,9 @@
                 `${student.name} (${student.rombel}) • Mapel: ${session.mapel}`;
             document.getElementById('exam-session-badge').textContent = `${session.jenjang} | ${session.sessionName}`;
 
+            // Render Dynamic Anti-Screenshot Watermark
+            renderExamWatermark(student);
+
             // Load Google Form URL
             const iframe = document.getElementById('google-form-iframe');
             iframe.src = session.gformUrl;
@@ -1391,6 +1461,17 @@
             // Start Live Exam Countdown Timer until EndTime
             startExamCountdown(new Date(session.endTime));
             showToast('Ujian Dimulai', 'Selamat mengerjakan. Jangan keluar dari halaman ini!', 'success');
+        }
+
+        function renderExamWatermark(student) {
+            const layer = document.getElementById('exam-watermark-layer');
+            if (!layer) return;
+            const stamp = `${student.name.toUpperCase()} • NIS: ${student.nis} • SMADIWA CBT`;
+            let html = '';
+            for (let i = 0; i < 24; i++) {
+                html += `<span class="font-mono text-sm font-extrabold text-slate-900 whitespace-nowrap">${stamp}</span>`;
+            }
+            layer.innerHTML = html;
         }
 
         function reloadExamIframe() {
@@ -1473,9 +1554,16 @@
                 }
             });
 
-            // Detect Window Blur (Opening another app / split screen)
+            // Detect Exit from Fullscreen Mode during exam
+            document.addEventListener('fullscreenchange', () => {
+                if (!document.fullscreenElement && activeStudentExam && activeStudentExam.status === 'ACTIVE') {
+                    triggerExamViolation('Keluar dari Mode Layar Penuh (Exit Fullscreen)');
+                }
+            });
+
+            // Detect Window Blur (Opening another app / split screen / screenshot tool)
             window.addEventListener('blur', () => {
-                // Note: Clicking inside an iframe triggers blur on parent window, so verify document.activeElement is NOT the Google Form iframe!
+                // Clicking inside Google Form iframe triggers blur on parent window, verify activeElement is NOT the iframe
                 setTimeout(() => {
                     if (
                         activeStudentExam &&
@@ -1483,26 +1571,39 @@
                         document.activeElement !== document.getElementById('google-form-iframe') &&
                         !document.hasFocus()
                     ) {
-                        triggerExamViolation('Keluar Fokus Layar Ujian (Split Screen / Pop-up)');
+                        triggerExamViolation('Keluar Fokus Layar Ujian / Membuka Aplikasi Lain');
                     }
                 }, 150);
             });
 
-            // Block Right Click & Developer Shortcuts during active exam
+            // Block Right Click during active exam
             document.addEventListener('contextmenu', (e) => {
                 if (activeStudentExam) e.preventDefault();
+            });
+
+            // Anti-Screenshot (PrintScreen) & Forbidden Shortcuts Protection
+            document.addEventListener('keyup', (e) => {
+                if (!activeStudentExam) return;
+                if (e.key === 'PrintScreen') {
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        navigator.clipboard.writeText('SCREENSHOT DIBLOKIR OLEH SMADIWA EXAM - CBT').catch(() => {});
+                    }
+                    triggerExamViolation('Percobaan Screenshot Layar (PrintScreen)');
+                }
             });
 
             document.addEventListener('keydown', (e) => {
                 if (!activeStudentExam) return;
                 if (
+                    e.key === 'PrintScreen' ||
                     e.key === 'F12' ||
-                    (e.ctrlKey && e.shiftKey && ['I', 'J', 'C'].includes(e.key.toUpperCase())) ||
-                    (e.ctrlKey && ['U', 'T', 'N', 'W'].includes(e.key.toUpperCase())) ||
+                    (e.ctrlKey && e.shiftKey && ['I', 'J', 'C', 'S'].includes(e.key.toUpperCase())) ||
+                    (e.metaKey && e.shiftKey && ['3', '4', '5', 'S'].includes(e.key.toUpperCase())) ||
+                    (e.ctrlKey && ['U', 'T', 'N', 'W', 'P', 'S'].includes(e.key.toUpperCase())) ||
                     (e.altKey && e.key === 'Tab')
                 ) {
                     e.preventDefault();
-                    triggerExamViolation(`Mencoba Pintasan Terlarang (${e.key})`);
+                    triggerExamViolation(`Pintasan Terlarang / Anti-Screenshot (${e.key})`);
                 }
             });
         }
@@ -1536,13 +1637,28 @@
             const students = getStudents();
             const latest = students.find(s => s.id === activeStudentExam.id);
 
-            if (latest && latest.status === 'ACTIVE') {
-                activeStudentExam = latest;
-                document.getElementById('violation-lock-overlay').classList.add('hidden');
-                showToast('Akses Dibuka Admin', 'Anda diizinkan melanjutkan ujian. Harap tetap fokus di halaman ini!', 'success');
-            } else {
-                showToast('Masih Terkunci', 'Superadmin / Pengawas belum membuka kunci akses Anda.', 'error');
+            if (!latest || latest.status !== 'ACTIVE') {
+                showToast('Masih Terkunci', 'Superadmin / Pengawas belum membuka kunci akses akun Anda di Dashboard.', 'error');
+                return;
             }
+
+            // Require latest dynamic token from proctor to resume exam
+            const enteredToken = document.getElementById('unlock-token-input').value.trim().toUpperCase();
+            const activeTokenObj = JSON.parse(localStorage.getItem(STORAGE_KEYS.TOKEN));
+            if (!activeTokenObj || enteredToken !== activeTokenObj.code) {
+                showToast('Token Diperlukan', 'Akses sudah dibuka admin, namun Anda wajib memasukkan Token Terbaru dari pengawas.', 'warning');
+                return;
+            }
+
+            activeStudentExam = latest;
+            document.getElementById('unlock-token-input').value = '';
+            document.getElementById('violation-lock-overlay').classList.add('hidden');
+            try {
+                if (document.documentElement.requestFullscreen) {
+                    document.documentElement.requestFullscreen().catch(() => {});
+                }
+            } catch (err) {}
+            showToast('Akses Dibuka Admin', 'Anda diizinkan melanjutkan ujian. Harap tetap fokus di halaman ini!', 'success');
         }
 
         function syncCurrentStudentLockState() {
@@ -1550,9 +1666,7 @@
             const students = getStudents();
             const latest = students.find(s => s.id === activeStudentExam.id);
             if (latest && latest.status === 'ACTIVE' && activeStudentExam.status === 'LOCKED') {
-                activeStudentExam = latest;
-                document.getElementById('violation-lock-overlay').classList.add('hidden');
-                showToast('Akses Dibuka Pengawas', 'Superadmin telah membuka kunci ujian Anda.', 'success');
+                showToast('Status Diperbarui Admin', 'Superadmin telah membuka kunci Anda. Masukkan token terbaru untuk melanjutkan.', 'info');
             }
         }
 
@@ -1650,6 +1764,7 @@
             // Apply Search & Filter
             const query = document.getElementById('admin-search-student').value.toLowerCase();
             const statusFilter = document.getElementById('admin-filter-status').value;
+            const jenjangFilter = document.getElementById('admin-filter-jenjang').value;
             const sortBy = document.getElementById('admin-sort-by').value;
 
             let filtered = students.filter(s => {
@@ -1657,7 +1772,8 @@
                                   s.nis.toLowerCase().includes(query) ||
                                   s.rombel.toLowerCase().includes(query);
                 const matchStatus = statusFilter === 'ALL' || s.status === statusFilter;
-                return matchText && matchStatus;
+                const matchJenjang = jenjangFilter === 'ALL' || s.jenjang === jenjangFilter;
+                return matchText && matchStatus && matchJenjang;
             });
 
             // Apply Sorting
@@ -1666,6 +1782,9 @@
                     // Prioritize LOCKED status first, then highest violation count
                     const lockDiff = (b.status === 'LOCKED' ? 1 : 0) - (a.status === 'LOCKED' ? 1 : 0);
                     if (lockDiff !== 0) return lockDiff;
+                    return (b.violations || 0) - (a.violations || 0);
+                }
+                if (sortBy === 'VIOLATION_COUNT') {
                     return (b.violations || 0) - (a.violations || 0);
                 }
                 if (sortBy === 'NAME_ASC') {
