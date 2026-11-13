@@ -881,4 +881,1351 @@
         let db = null;
         let auth = null;
         let currentUser = null;
-// ... existing code ... -->
+        let isCloudReady = false;
+
+        // ==========================================
+        // 2. GLOBAL APPLICATION STATE
+        // ==========================================
+        let state = {
+            token: {
+                current: 'SMDW26',
+                intervalMinutes: 15,
+                expiresAt: Date.now() + 15 * 60 * 1000
+            },
+            settings: {
+                schoolRadiusMeters: SCHOOL_COORDS.defaultRadiusMeters
+            },
+            sessions: [],
+            students: []
+        };
+
+        let geoState = {
+            lat: null,
+            lng: null,
+            distance: null,
+            isWithinRadius: false,
+            isSimulated: false,
+            errorMsg: ''
+        };
+
+        let isAdminLoggedIn = false;
+        let activeStudentExam = null;
+        let examTimerInterval = null;
+        let tokenTimerInterval = null;
+
+        // ==========================================
+        // 3. FIREBASE INITIALIZATION & REALTIME SYNC
+        // ==========================================
+        async function initFirebaseAndData() {
+            try {
+                const firebaseConfig = (typeof __firebase_config !== 'undefined' && __firebase_config)
+                    ? JSON.parse(__firebase_config)
+                    : MANUAL_FIREBASE_CONFIG;
+
+                const app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    const cred = await signInWithCustomToken(auth, __initial_auth_token);
+                    currentUser = cred.user;
+                } else {
+                    const cred = await signInAnonymously(auth);
+                    currentUser = cred.user;
+                }
+
+                isCloudReady = true;
+                updateCloudStatusUI(true, 'DB Terhubung');
+                await seedDefaultDataIfEmpty();
+                attachRealtimeListeners();
+            } catch (err) {
+                console.error('Firebase Init Error:', err);
+                const errCode = err?.code || 'Error';
+                updateCloudStatusUI(false, `DB Offline (${errCode})`);
+                loadFallbackDefaults();
+                showToast(
+                    'Koneksi Database Terkendala',
+                    `Pastikan Anonymous Auth & Firestore Rules di Firebase Console sudah aktif (${errCode}). Mode lokal sementara aktif.`,
+                    'warning'
+                );
+            }
+        }
+
+        function updateCloudStatusUI(connected, label) {
+            const badge = document.getElementById('nav-cloud-badge');
+            const icon = document.getElementById('nav-cloud-icon');
+            const text = document.getElementById('nav-cloud-text');
+            if (!badge || !icon || !text) return;
+
+            badge.classList.remove('hidden');
+            badge.classList.add('flex');
+            text.textContent = label;
+
+            if (connected) {
+                badge.className = 'flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-emerald-500/20 border border-emerald-400/40 text-emerald-200 text-[11px] font-semibold';
+                icon.className = 'fa-solid fa-cloud text-emerald-400';
+            } else {
+                badge.className = 'flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-rose-500/20 border border-rose-400/40 text-rose-200 text-[11px] font-semibold';
+                icon.className = 'fa-solid fa-triangle-exclamation text-rose-400';
+            }
+        }
+
+        function getConfigDocRef() {
+            return doc(db, 'artifacts', appId, 'public', 'data', 'config', 'main');
+        }
+        function getSessionsColRef() {
+            return collection(db, 'artifacts', appId, 'public', 'data', 'sessions');
+        }
+        function getStudentsColRef() {
+            return collection(db, 'artifacts', appId, 'public', 'data', 'students');
+        }
+
+        function buildDefaultSessions() {
+            const now = new Date();
+            const start = new Date(now.getTime() - 30 * 60 * 1000);
+            const end = new Date(now.getTime() + 120 * 60 * 1000);
+            const toLocalISO = (d) => {
+                const pad = (n) => String(n).padStart(2, '0');
+                return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+            };
+            return [
+                {
+                    id: 'sess-x-1',
+                    jenjang: 'Kelas X',
+                    name: 'Sesi 1 - Pagi',
+                    mapel: 'Matematika Wajib',
+                    start: toLocalISO(start),
+                    end: toLocalISO(end),
+                    gform: 'https://docs.google.com/forms/d/e/1FAIpQLSfD4_sample_form/viewform?embedded=true'
+                },
+                {
+                    id: 'sess-xi-1',
+                    jenjang: 'Kelas XI',
+                    name: 'Sesi 1 - Pagi',
+                    mapel: 'Bahasa Indonesia',
+                    start: toLocalISO(start),
+                    end: toLocalISO(end),
+                    gform: 'https://docs.google.com/forms/d/e/1FAIpQLSfD4_sample_form/viewform?embedded=true'
+                },
+                {
+                    id: 'sess-xii-1',
+                    jenjang: 'Kelas XII',
+                    name: 'Sesi 1 - Pagi',
+                    mapel: 'Pendidikan Agama Islam & Kemuhammadiyahan',
+                    start: toLocalISO(start),
+                    end: toLocalISO(end),
+                    gform: 'https://docs.google.com/forms/d/e/1FAIpQLSfD4_sample_form/viewform?embedded=true'
+                }
+            ];
+        }
+
+        function loadFallbackDefaults() {
+            state.sessions = buildDefaultSessions();
+            populateAvailableSessions();
+            renderAdminSessionsGrid();
+            renderAdminStudentsTable();
+        }
+
+        async function seedDefaultDataIfEmpty() {
+            if (!db || !currentUser) return;
+            const cfgSnap = await getDoc(getConfigDocRef());
+            if (!cfgSnap.exists()) {
+                await setDoc(getConfigDocRef(), {
+                    token: state.token,
+                    settings: state.settings
+                });
+                const defaults = buildDefaultSessions();
+                for (const s of defaults) {
+                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'sessions', s.id), s);
+                }
+            }
+        }
+
+        function attachRealtimeListeners() {
+            if (!db || !currentUser) return;
+
+            onSnapshot(getConfigDocRef(), (snap) => {
+                if (snap.exists()) {
+                    const data = snap.data();
+                    if (data.token) state.token = data.token;
+                    if (data.settings) {
+                        state.settings = data.settings;
+                        const radInput = document.getElementById('admin-radius-input');
+                        if (radInput) radInput.value = state.settings.schoolRadiusMeters || 200;
+                        const descEl = document.getElementById('login-radius-desc');
+                        if (descEl) {
+                            descEl.textContent = `Koordinat: -7.3654442, 109.8978844 (Radius maksimal ${state.settings.schoolRadiusMeters || 200}m dari sekolah).`;
+                        }
+                        recalculateGeofenceStatus();
+                    }
+                    updateAdminTokenUI();
+                }
+            }, (err) => console.error('Config listener error:', err));
+
+            onSnapshot(getSessionsColRef(), (snap) => {
+                const list = [];
+                snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
+                state.sessions = list;
+                populateAvailableSessions();
+                renderAdminSessionsGrid();
+            }, (err) => console.error('Sessions listener error:', err));
+
+            onSnapshot(getStudentsColRef(), (snap) => {
+                const list = [];
+                snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
+                state.students = list;
+                renderAdminStudentsTable();
+                syncCurrentStudentLockState();
+            }, (err) => console.error('Students listener error:', err));
+        }
+
+        // ==========================================
+        // 4. CLOCK, GEOLOCATION & SECURITY HANDLERS
+        // ==========================================
+        function startHeaderClock() {
+            const updateClock = () => {
+                const el = document.getElementById('header-clock');
+                if (!el) return;
+                const now = new Date();
+                const timeStr = now.toLocaleTimeString('id-ID', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    hour12: false
+                });
+                el.textContent = `${timeStr} WIB`;
+            };
+            updateClock();
+            setInterval(updateClock, 1000);
+        }
+
+        function calculateDistanceMeters(lat1, lon1, lat2, lon2) {
+            const R = 6371e3;
+            const toRad = (deg) => (deg * Math.PI) / 180;
+            const dLat = toRad(lat2 - lat1);
+            const dLon = toRad(lon2 - lon1);
+            const a = Math.sin(dLat / 2) ** 2 +
+                      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        }
+
+        function recalculateGeofenceStatus() {
+            const maxRadius = Number(state.settings?.schoolRadiusMeters) || SCHOOL_COORDS.defaultRadiusMeters;
+            if (geoState.isSimulated) {
+                geoState.distance = 12;
+                geoState.isWithinRadius = true;
+            } else if (geoState.lat !== null && geoState.lng !== null) {
+                geoState.distance = Math.round(calculateDistanceMeters(
+                    geoState.lat, geoState.lng, SCHOOL_COORDS.lat, SCHOOL_COORDS.lng
+                ));
+                geoState.isWithinRadius = geoState.distance <= maxRadius;
+            } else {
+                geoState.isWithinRadius = false;
+            }
+            updateGeoUI();
+        }
+
+        function updateGeoUI() {
+            const navBadge = document.getElementById('nav-geo-badge');
+            const navText = document.getElementById('nav-geo-text');
+            const distText = document.getElementById('geo-distance-text');
+            const accessBadge = document.getElementById('geo-access-badge');
+            const maxRadius = Number(state.settings?.schoolRadiusMeters) || SCHOOL_COORDS.defaultRadiusMeters;
+
+            if (geoState.isWithinRadius) {
+                const label = geoState.isSimulated ? 'Simulasi Sekolah (12m)' : `Di Sekolah (${geoState.distance}m)`;
+                if (navBadge) navBadge.className = 'flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-500/20 border border-emerald-400/40 text-emerald-200 text-xs font-medium hover:bg-emerald-500/30 transition cursor-pointer';
+                if (navText) navText.textContent = label;
+                if (distText) {
+                    distText.textContent = `${geoState.distance} meter (Batas ${maxRadius}m)`;
+                    distText.className = 'font-mono font-bold text-emerald-400';
+                }
+                if (accessBadge) {
+                    accessBadge.textContent = 'Diizinkan';
+                    accessBadge.className = 'px-2 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 font-semibold';
+                }
+            } else if (geoState.distance !== null) {
+                if (navBadge) navBadge.className = 'flex items-center gap-2 px-3 py-1.5 rounded-xl bg-rose-500/20 border border-rose-400/40 text-rose-200 text-xs font-medium hover:bg-rose-500/30 transition cursor-pointer';
+                if (navText) navText.textContent = `Di Luar Area (${geoState.distance}m)`;
+                if (distText) {
+                    distText.textContent = `${geoState.distance} meter (Maks ${maxRadius}m)`;
+                    distText.className = 'font-mono font-bold text-rose-400';
+                }
+                if (accessBadge) {
+                    accessBadge.textContent = 'Ditolak (Luar Area)';
+                    accessBadge.className = 'px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-300 font-semibold';
+                }
+            } else {
+                if (navBadge) navBadge.className = 'flex items-center gap-2 px-3 py-1.5 rounded-xl bg-amber-500/20 border border-amber-400/40 text-amber-200 text-xs font-medium hover:bg-amber-500/30 transition cursor-pointer';
+                if (navText) navText.textContent = geoState.errorMsg || 'GPS Tidak Aktif';
+                if (distText) {
+                    distText.textContent = geoState.errorMsg || 'Izin lokasi ditolak / timeout';
+                    distText.className = 'font-mono font-bold text-amber-300';
+                }
+                if (accessBadge) {
+                    accessBadge.textContent = 'Butuh Izin GPS';
+                    accessBadge.className = 'px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 font-semibold';
+                }
+            }
+        }
+
+        function checkRealGeolocation() {
+            const navText = document.getElementById('nav-geo-text');
+            if (navText && !geoState.isSimulated) navText.textContent = 'Mengecek GPS...';
+
+            if (!('geolocation' in navigator)) {
+                geoState.errorMsg = 'Browser Tidak Dukung GPS';
+                recalculateGeofenceStatus();
+                return;
+            }
+
+            navigator.geolocation.getCurrentPosition(
+                (pos) => {
+                    geoState.lat = pos.coords.latitude;
+                    geoState.lng = pos.coords.longitude;
+                    geoState.errorMsg = '';
+                    recalculateGeofenceStatus();
+                },
+                (err) => {
+                    geoState.errorMsg = err.code === 1 ? 'Izin GPS Ditolak' : 'Sinyal GPS Lemah';
+                    recalculateGeofenceStatus();
+                },
+                { enableHighAccuracy: true, timeout: 8000, maximumAge: 10000 }
+            );
+        }
+
+        function toggleSimulatedLocation() {
+            geoState.isSimulated = !geoState.isSimulated;
+            const btn = document.getElementById('btn-sim-geo');
+            if (btn) {
+                btn.innerHTML = geoState.isSimulated
+                    ? '<i class="fa-solid fa-check mr-1"></i>Simulasi Aktif'
+                    : '<i class="fa-solid fa-map-pin mr-1"></i>Simulasi Lokasi Sekolah';
+            }
+            recalculateGeofenceStatus();
+            showToast(
+                geoState.isSimulated ? 'Mode Simulasi Aktif' : 'Mode Simulasi Dimatikan',
+                geoState.isSimulated
+                    ? 'Lokasi perangkat disimulasikan berada di SMA Muhammadiyah Wonosobo.'
+                    : 'Sistem kembali menggunakan koordinat GPS asli perangkat.',
+                'info'
+            );
+        }
+
+        function openGeoHelperModal() {
+            checkRealGeolocation();
+            showToast('Verifikasi Lokasi', 'Memperbarui koordinat GPS SMA Muhammadiyah Wonosobo (-7.3654442, 109.8978844)...', 'info');
+        }
+
+        // ==========================================
+        // 5. TOAST NOTIFICATIONS & UI HELPERS
+        // ==========================================
+        function showToast(title, message, type = 'info') {
+            const container = document.getElementById('toast-container');
+            if (!container) return;
+
+            const colors = {
+                info: 'bg-blue-950/95 border-blue-400/40 text-white',
+                success: 'bg-emerald-950/95 border-emerald-400/40 text-white',
+                warning: 'bg-amber-950/95 border-amber-400/40 text-white',
+                error: 'bg-rose-950/95 border-rose-400/40 text-white'
+            };
+            const icons = {
+                info: 'fa-circle-info text-blue-400',
+                success: 'fa-circle-check text-emerald-400',
+                warning: 'fa-triangle-exclamation text-amber-400',
+                error: 'fa-circle-xmark text-rose-400'
+            };
+
+            const toast = document.createElement('div');
+            toast.className = `pointer-events-auto rounded-2xl border p-3.5 shadow-2xl backdrop-blur-md transition-all duration-300 ${colors[type] || colors.info}`;
+            toast.innerHTML = `
+                <div class="flex items-start gap-3">
+                    <i class="fa-solid ${icons[type] || icons.info} mt-0.5 text-base"></i>
+                    <div class="flex-1 text-xs">
+                        <p class="font-bold text-sm mb-0.5">${escapeHtml(title)}</p>
+                        <p class="opacity-90 leading-relaxed">${escapeHtml(message)}</p>
+                    </div>
+                </div>
+            `;
+            container.appendChild(toast);
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateY(8px)';
+                setTimeout(() => toast.remove(), 300);
+            }, 4200);
+        }
+
+        function escapeHtml(str) {
+            return String(str ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
+        function formatDateTimeID(isoStr) {
+            if (!isoStr) return '-';
+            const d = new Date(isoStr);
+            if (isNaN(d.getTime())) return isoStr;
+            return d.toLocaleString('id-ID', {
+                day: '2-digit',
+                month: 'short',
+                year: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            }) + ' WIB';
+        }
+
+        // ==========================================
+        // 6. STUDENT SESSION SELECTION & LOGIN FLOW
+        // ==========================================
+        function populateAvailableSessions() {
+            const jenjangEl = document.getElementById('stu-jenjang');
+            const sessionSelect = document.getElementById('stu-session');
+            if (!jenjangEl || !sessionSelect) return;
+
+            const selectedJenjang = jenjangEl.value;
+            const filtered = state.sessions.filter((s) => s.jenjang === selectedJenjang);
+
+            sessionSelect.innerHTML = '';
+            if (filtered.length === 0) {
+                const opt = document.createElement('option');
+                opt.value = '';
+                opt.textContent = `Belum ada jadwal ujian untuk ${selectedJenjang}`;
+                sessionSelect.appendChild(opt);
+            } else {
+                filtered.forEach((sess) => {
+                    const opt = document.createElement('option');
+                    opt.value = sess.id;
+                    opt.textContent = `${sess.name} — ${sess.mapel}`;
+                    sessionSelect.appendChild(opt);
+                });
+            }
+            updateSelectedSessionInfo();
+        }
+
+        function updateSelectedSessionInfo() {
+            const sessionSelect = document.getElementById('stu-session');
+            const infoBanner = document.getElementById('session-schedule-info');
+            if (!sessionSelect || !infoBanner) return;
+
+            const sess = state.sessions.find((s) => s.id === sessionSelect.value);
+            if (!sess) {
+                infoBanner.innerHTML = `<span class="text-slate-600"><i class="fa-solid fa-circle-info mr-1.5 text-slate-400"></i>Silakan pilih jenjang yang memiliki jadwal aktif.</span>`;
+                return;
+            }
+
+            const now = Date.now();
+            const startMs = new Date(sess.start).getTime();
+            const endMs = new Date(sess.end).getTime();
+
+            let statusBadge = `<span class="px-2 py-0.5 rounded bg-emerald-100 text-emerald-700 font-bold">Sedang Berlangsung</span>`;
+            if (now < startMs) {
+                statusBadge = `<span class="px-2 py-0.5 rounded bg-amber-100 text-amber-700 font-bold">Belum Dimulai</span>`;
+            } else if (now > endMs) {
+                statusBadge = `<span class="px-2 py-0.5 rounded bg-rose-100 text-rose-700 font-bold">Waktu Berakhir</span>`;
+            }
+
+            infoBanner.innerHTML = `
+                <span><i class="fa-regular fa-clock mr-1.5 text-blue-600"></i><strong>Mulai:</strong> ${formatDateTimeID(sess.start)} &bull; <strong>Selesai:</strong> ${formatDateTimeID(sess.end)}</span>
+                ${statusBadge}
+            `;
+        }
+
+        async function handleStudentStartExam(event) {
+            event.preventDefault();
+
+            const name = document.getElementById('stu-name').value.trim();
+            const nis = document.getElementById('stu-nis').value.trim();
+            const jenjang = document.getElementById('stu-jenjang').value;
+            const rombel = document.getElementById('stu-rombel').value.trim();
+            const sessionId = document.getElementById('stu-session').value;
+            const inputToken = document.getElementById('stu-token').value.trim().toUpperCase();
+
+            // 1. Check Geofencing Location
+            if (!geoState.isWithinRadius) {
+                showToast(
+                    'Akses Lokasi Ditolak',
+                    'Ujian hanya dapat dikerjakan di lingkungan SMA Muhammadiyah Wonosobo. Aktifkan GPS atau gunakan Simulasi Lokasi untuk uji coba.',
+                    'error'
+                );
+                return;
+            }
+
+            // 2. Validate Selected Session & Time Window
+            const sess = state.sessions.find((s) => s.id === sessionId);
+            if (!sess) {
+                showToast('Sesi Tidak Valid', 'Silakan pilih sesi dan mata pelajaran ujian terlebih dahulu.', 'error');
+                return;
+            }
+
+            const now = Date.now();
+            const startMs = new Date(sess.start).getTime();
+            const endMs = new Date(sess.end).getTime();
+
+            if (now < startMs) {
+                showToast('Ujian Belum Dimulai', `Sesi ini baru dimulai pada ${formatDateTimeID(sess.start)}.`, 'warning');
+                return;
+            }
+            if (now > endMs) {
+                showToast('Waktu Ujian Habis', `Batas akhir pengerjaan (${formatDateTimeID(sess.end)}) telah lewat.`, 'error');
+                return;
+            }
+
+            // 3. Validate Dynamic Proctor Token
+            const activeToken = (state.token?.current || '').toUpperCase();
+            if (!inputToken || inputToken !== activeToken) {
+                showToast('Token Tidak Sesuai', 'Token yang Anda masukkan salah atau sudah kedaluwarsa. Dengarkan token terbaru dari pengawas.', 'error');
+                return;
+            }
+
+            // 4. Register or Resume Student Record in Cloud DB
+            const studentDocId = `${nis.replace(/[^a-zA-Z0-9_-]/g, '_')}_${sess.id}`;
+            const existing = state.students.find((st) => st.id === studentDocId);
+
+            if (existing && existing.status === 'LOCKED') {
+                activeStudentExam = { ...existing, session: sess };
+                enterActiveExamUI(activeStudentExam);
+                triggerViolationLock('Akun masih terkunci dari pelanggaran sebelumnya', false);
+                return;
+            }
+
+            const studentRecord = {
+                id: studentDocId,
+                name,
+                nis,
+                jenjang,
+                rombel,
+                sessionId: sess.id,
+                sessionName: sess.name,
+                mapel: sess.mapel,
+                status: 'ACTIVE',
+                violationCount: existing?.violationCount || 0,
+                lastViolationReason: existing?.lastViolationReason || '-',
+                lastActivity: new Date().toISOString()
+            };
+
+            if (isCloudReady && db) {
+                try {
+                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'students', studentDocId), studentRecord, { merge: true });
+                } catch (e) {
+                    console.error('Failed saving student record:', e);
+                }
+            } else {
+                const idx = state.students.findIndex((s) => s.id === studentDocId);
+                if (idx >= 0) state.students[idx] = studentRecord;
+                else state.students.push(studentRecord);
+            }
+
+            activeStudentExam = { ...studentRecord, session: sess };
+            enterActiveExamUI(activeStudentExam);
+        }
+
+        function enterActiveExamUI(studentExam) {
+            document.getElementById('main-navbar')?.classList.add('hidden');
+            document.getElementById('main-footer')?.classList.add('hidden');
+            document.getElementById('view-student-login')?.classList.add('hidden');
+            document.getElementById('view-admin-dashboard')?.classList.add('hidden');
+            document.getElementById('view-exam-active')?.classList.remove('hidden');
+
+            document.getElementById('exam-header-student-info').textContent =
+                `Peserta: ${studentExam.name} (${studentExam.nis}) | ${studentExam.jenjang} - ${studentExam.rombel} | Mapel: ${studentExam.mapel}`;
+            document.getElementById('exam-session-badge').textContent = studentExam.sessionName;
+
+            const iframe = document.getElementById('google-form-iframe');
+            if (iframe && studentExam.session?.gform) {
+                iframe.src = studentExam.session.gform;
+            }
+
+            renderExamWatermark(studentExam);
+            startExamCountdown(studentExam.session.end);
+
+            try {
+                if (document.documentElement.requestFullscreen && !document.fullscreenElement) {
+                    document.documentElement.requestFullscreen().catch(() => {});
+                }
+            } catch (_) {}
+        }
+
+        function renderExamWatermark(studentExam) {
+            const layer = document.getElementById('exam-watermark-layer');
+            if (!layer) return;
+            const stamp = `${studentExam.name} • ${studentExam.nis} • SMADIWA CBT`;
+            layer.innerHTML = Array.from({ length: 24 })
+                .map(() => `<span class="text-slate-900 font-mono font-extrabold text-sm whitespace-nowrap">${escapeHtml(stamp)}</span>`)
+                .join('');
+        }
+
+        function reloadExamIframe() {
+            const iframe = document.getElementById('google-form-iframe');
+            if (iframe && activeStudentExam?.session?.gform) {
+                iframe.src = activeStudentExam.session.gform;
+                showToast('Memuat Ulang Form', 'Lembar soal Google Form sedang dimuat ulang.', 'info');
+            }
+        }
+
+        function startExamCountdown(endIso) {
+            if (examTimerInterval) clearInterval(examTimerInterval);
+            const endMs = new Date(endIso).getTime();
+
+            const tick = () => {
+                const timerEl = document.getElementById('exam-countdown-timer');
+                if (!timerEl) return;
+                const diff = endMs - Date.now();
+                if (diff <= 0) {
+                    timerEl.textContent = '00:00:00';
+                    clearInterval(examTimerInterval);
+                    finishStudentExam(true);
+                    return;
+                }
+                const hrs = Math.floor(diff / 3600000);
+                const mins = Math.floor((diff % 3600000) / 60000);
+                const secs = Math.floor((diff % 60000) / 1000);
+                const pad = (n) => String(n).padStart(2, '0');
+                timerEl.textContent = `${pad(hrs)}:${pad(mins)}:${pad(secs)}`;
+            };
+            tick();
+            examTimerInterval = setInterval(tick, 1000);
+        }
+
+        function confirmFinishExam() {
+            const existingConfirm = document.getElementById('finish-confirm-box');
+            if (existingConfirm) return;
+
+            const box = document.createElement('div');
+            box.id = 'finish-confirm-box';
+            box.className = 'fixed inset-0 z-[65] bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4';
+            box.innerHTML = `
+                <div class="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl text-center space-y-4">
+                    <div class="w-14 h-14 rounded-2xl bg-emerald-100 text-emerald-600 flex items-center justify-center mx-auto text-2xl">
+                        <i class="fa-solid fa-paper-plane"></i>
+                    </div>
+                    <h3 class="text-lg font-extrabold text-slate-900">Selesaikan Ujian Sekarang?</h3>
+                    <p class="text-xs text-slate-600 leading-relaxed">
+                        Pastikan Anda sudah menekan tombol <strong>Kirim / Submit</strong> di dalam formulir Google Form sebelum mengakhiri sesi ujian ini.
+                    </p>
+                    <div class="flex gap-2.5 pt-2">
+                        <button id="btn-cancel-finish" class="flex-1 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold cursor-pointer">
+                            Kembali ke Soal
+                        </button>
+                        <button id="btn-confirm-finish" class="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow cursor-pointer">
+                            Ya, Saya Sudah Kirim
+                        </button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(box);
+            document.getElementById('btn-cancel-finish').onclick = () => box.remove();
+            document.getElementById('btn-confirm-finish').onclick = () => {
+                box.remove();
+                finishStudentExam(false);
+            };
+        }
+
+        async function finishStudentExam(isAutoTimeout = false) {
+            if (examTimerInterval) clearInterval(examTimerInterval);
+
+            if (activeStudentExam) {
+                const updates = {
+                    status: 'FINISHED',
+                    lastActivity: new Date().toISOString()
+                };
+                if (isCloudReady && db) {
+                    try {
+                        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'students', activeStudentExam.id), updates);
+                    } catch (e) {
+                        console.error('Finish update error:', e);
+                    }
+                } else {
+                    const idx = state.students.findIndex((s) => s.id === activeStudentExam.id);
+                    if (idx >= 0) Object.assign(state.students[idx], updates);
+                }
+            }
+
+            activeStudentExam = null;
+            document.getElementById('violation-lock-overlay')?.classList.add('hidden');
+            document.getElementById('view-exam-active')?.classList.add('hidden');
+            document.getElementById('main-navbar')?.classList.remove('hidden');
+            document.getElementById('main-footer')?.classList.remove('hidden');
+            document.getElementById('view-student-login')?.classList.remove('hidden');
+            document.getElementById('google-form-iframe').src = 'about:blank';
+
+            try {
+                if (document.fullscreenElement) {
+                    document.exitFullscreen().catch(() => {});
+                }
+            } catch (_) {}
+
+            showToast(
+                isAutoTimeout ? 'Waktu Ujian Habis' : 'Ujian Selesai',
+                isAutoTimeout
+                    ? 'Batas waktu pengerjaan telah berakhir. Sesi ujian otomatis ditutup.'
+                    : 'Terima kasih, sesi ujian Anda telah selesai dicatat.',
+                'success'
+            );
+        }
+
+        // ==========================================
+        // 7. ANTI-CHEAT, TAB SWITCH & SCREENSHOT GUARD
+        // ==========================================
+        function setupAntiCheatListeners() {
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden && activeStudentExam && activeStudentExam.status !== 'LOCKED') {
+                    triggerViolationLock('Berpindah Tab / Minimize Browser');
+                }
+            });
+
+            window.addEventListener('blur', () => {
+                setTimeout(() => {
+                    if (
+                        activeStudentExam &&
+                        activeStudentExam.status !== 'LOCKED' &&
+                        document.activeElement?.tagName !== 'IFRAME' &&
+                        !document.hasFocus()
+                    ) {
+                        triggerViolationLock('Keluar Fokus Jendela / Membuka Aplikasi Lain');
+                    }
+                }, 350);
+            });
+
+            document.addEventListener('fullscreenchange', () => {
+                if (!document.fullscreenElement && activeStudentExam && activeStudentExam.status !== 'LOCKED') {
+                    triggerViolationLock('Keluar dari Mode Layar Penuh (Fullscreen)');
+                }
+            });
+
+            document.addEventListener('contextmenu', (e) => {
+                if (activeStudentExam) e.preventDefault();
+            });
+
+            document.addEventListener('keydown', (e) => {
+                if (!activeStudentExam) return;
+                const key = e.key.toLowerCase();
+                if (
+                    e.key === 'PrintScreen' ||
+                    ((e.ctrlKey || e.metaKey) && ['p', 's', 'u', 'c'].includes(key)) ||
+                    ((e.metaKey || e.ctrlKey) && e.shiftKey && ['3', '4', '5', 's', 'i'].includes(key))
+                ) {
+                    e.preventDefault();
+                    document.body.classList.add('anti-capture-veil');
+                    setTimeout(() => document.body.classList.remove('anti-capture-veil'), 1500);
+                    triggerViolationLock('Percobaan Screenshot / Cetak Layar');
+                }
+            });
+
+            window.addEventListener('keyup', (e) => {
+                if (e.key === 'PrintScreen' && activeStudentExam) {
+                    document.body.classList.add('anti-capture-veil');
+                    setTimeout(() => document.body.classList.remove('anti-capture-veil'), 1500);
+                    triggerViolationLock('Tombol PrintScreen Terdeteksi');
+                }
+            });
+        }
+
+        async function triggerViolationLock(reason, incrementCount = true) {
+            if (!activeStudentExam) return;
+
+            const newCount = incrementCount
+                ? (activeStudentExam.violationCount || 0) + 1
+                : (activeStudentExam.violationCount || 1);
+            const nowIso = new Date().toISOString();
+
+            activeStudentExam.status = 'LOCKED';
+            activeStudentExam.violationCount = newCount;
+            activeStudentExam.lastViolationReason = reason;
+            activeStudentExam.lastActivity = nowIso;
+
+            document.getElementById('lock-stu-name').textContent = `${activeStudentExam.name} (${activeStudentExam.nis})`;
+            document.getElementById('lock-reason').textContent = reason;
+            document.getElementById('lock-count').textContent = `${newCount}x`;
+            document.getElementById('lock-time').textContent = formatDateTimeID(nowIso);
+            document.getElementById('unlock-token-input').value = '';
+            document.getElementById('violation-lock-overlay')?.classList.remove('hidden');
+
+            if (isCloudReady && db) {
+                try {
+                    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'students', activeStudentExam.id), {
+                        status: 'LOCKED',
+                        violationCount: newCount,
+                        lastViolationReason: reason,
+                        lastActivity: nowIso
+                    });
+                } catch (e) {
+                    console.error('Violation sync error:', e);
+                }
+            } else {
+                const idx = state.students.findIndex((s) => s.id === activeStudentExam.id);
+                if (idx >= 0) Object.assign(state.students[idx], activeStudentExam);
+                renderAdminStudentsTable();
+            }
+        }
+
+        function syncCurrentStudentLockState() {
+            if (!activeStudentExam) return;
+            const latest = state.students.find((s) => s.id === activeStudentExam.id);
+            if (!latest) return;
+
+            activeStudentExam.status = latest.status;
+            activeStudentExam.violationCount = latest.violationCount;
+            activeStudentExam.lastViolationReason = latest.lastViolationReason;
+
+            if (latest.status === 'LOCKED') {
+                document.getElementById('lock-stu-name').textContent = `${latest.name} (${latest.nis})`;
+                document.getElementById('lock-reason').textContent = latest.lastViolationReason || 'Pelanggaran Keamanan';
+                document.getElementById('lock-count').textContent = `${latest.violationCount || 1}x`;
+                document.getElementById('lock-time').textContent = formatDateTimeID(latest.lastActivity);
+                document.getElementById('violation-lock-overlay')?.classList.remove('hidden');
+            }
+        }
+
+        function checkUnlockStatusFromAdmin() {
+            if (!activeStudentExam) return;
+            const latest = state.students.find((s) => s.id === activeStudentExam.id);
+            const currentStatus = latest ? latest.status : activeStudentExam.status;
+
+            if (currentStatus === 'LOCKED') {
+                showToast(
+                    'Belum Dibuka oleh Pengawas',
+                    'Status akun Anda masih terkunci di server. Silakan lapor ke Pengawas / Superadmin untuk membuka akses terlebih dahulu.',
+                    'error'
+                );
+                return;
+            }
+
+            const enteredToken = document.getElementById('unlock-token-input').value.trim().toUpperCase();
+            const validToken = (state.token?.current || '').toUpperCase();
+
+            if (!enteredToken || enteredToken !== validToken) {
+                showToast(
+                    'Token Salah',
+                    'Akses sudah dibuka admin, namun Token Terbaru yang Anda masukkan belum sesuai.',
+                    'warning'
+                );
+                return;
+            }
+
+            activeStudentExam.status = 'ACTIVE';
+            document.getElementById('violation-lock-overlay')?.classList.add('hidden');
+            try {
+                if (document.documentElement.requestFullscreen && !document.fullscreenElement) {
+                    document.documentElement.requestFullscreen().catch(() => {});
+                }
+            } catch (_) {}
+            showToast('Akses Dipulihkan', 'Silakan lanjutkan pengerjaan ujian Anda dengan tertib.', 'success');
+        }
+
+        // ==========================================
+        // 8. TOKEN ROTATION & SUPERADMIN CONTROLS
+        // ==========================================
+        function generateRandomTokenCode(length = 6) {
+            const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+            let res = '';
+            for (let i = 0; i < length; i++) {
+                res += chars.charAt(Math.floor(Math.random() * chars.length));
+            }
+            return res;
+        }
+
+        function startTokenRotationWatcher() {
+            if (tokenTimerInterval) clearInterval(tokenTimerInterval);
+            tokenTimerInterval = setInterval(async () => {
+                const now = Date.now();
+                const expiresAt = Number(state.token?.expiresAt) || 0;
+                const remainingMs = expiresAt - now;
+
+                const countdownEl = document.getElementById('admin-token-countdown');
+                if (countdownEl) {
+                    if (remainingMs > 0) {
+                        const mins = Math.floor(remainingMs / 60000);
+                        const secs = Math.floor((remainingMs % 60000) / 1000);
+                        countdownEl.textContent = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+                    } else {
+                        countdownEl.textContent = '00:00';
+                    }
+                }
+
+                if (remainingMs <= 0 && (isAdminLoggedIn || !isCloudReady)) {
+                    await forceGenerateNewToken(true);
+                }
+            }, 1000);
+        }
+
+        function updateAdminTokenUI() {
+            const tokenEl = document.getElementById('admin-active-token');
+            const intervalEl = document.getElementById('admin-token-interval');
+            if (tokenEl) tokenEl.textContent = state.token?.current || '------';
+            if (intervalEl && state.token?.intervalMinutes) {
+                intervalEl.value = String(state.token.intervalMinutes);
+            }
+        }
+
+        async function forceGenerateNewToken(isAuto = false) {
+            const intervalMins = Number(state.token?.intervalMinutes) || 15;
+            const updatedToken = {
+                current: generateRandomTokenCode(6),
+                intervalMinutes: intervalMins,
+                expiresAt: Date.now() + intervalMins * 60 * 1000
+            };
+            state.token = updatedToken;
+            updateAdminTokenUI();
+
+            if (isCloudReady && db) {
+                try {
+                    await setDoc(getConfigDocRef(), { token: updatedToken }, { merge: true });
+                } catch (e) {
+                    console.error('Token sync error:', e);
+                }
+            }
+            if (!isAuto) {
+                showToast('Token Diperbarui', `Token baru (${updatedToken.current}) siap dibacakan kepada peserta.`, 'success');
+            }
+        }
+
+        async function changeTokenInterval() {
+            const intervalEl = document.getElementById('admin-token-interval');
+            if (!intervalEl) return;
+            const mins = Number(intervalEl.value) || 15;
+            const updatedToken = {
+                current: state.token?.current || generateRandomTokenCode(6),
+                intervalMinutes: mins,
+                expiresAt: Date.now() + mins * 60 * 1000
+            };
+            state.token = updatedToken;
+            if (isCloudReady && db) {
+                try {
+                    await setDoc(getConfigDocRef(), { token: updatedToken }, { merge: true });
+                } catch (e) {
+                    console.error('Interval sync error:', e);
+                }
+            }
+            showToast('Interval Token Diubah', `Token akan berganti otomatis setiap ${mins} menit.`, 'info');
+        }
+
+        function openAdminLoginModal() {
+            document.getElementById('admin-username-input').value = '';
+            document.getElementById('admin-password-input').value = '';
+            document.getElementById('modal-admin-login')?.classList.remove('hidden');
+        }
+
+        function closeAdminLoginModal() {
+            document.getElementById('modal-admin-login')?.classList.add('hidden');
+        }
+
+        function handleAdminLogin(event) {
+            event.preventDefault();
+            const user = document.getElementById('admin-username-input').value.trim();
+            const pass = document.getElementById('admin-password-input').value.trim();
+
+            if (user === 'adam' && pass === '321532') {
+                isAdminLoggedIn = true;
+                closeAdminLoginModal();
+                document.getElementById('view-student-login')?.classList.add('hidden');
+                document.getElementById('view-admin-dashboard')?.classList.remove('hidden');
+                document.getElementById('btn-open-admin-login')?.classList.add('hidden');
+                const logoutBtn = document.getElementById('btn-admin-logout');
+                logoutBtn?.classList.remove('hidden');
+                logoutBtn?.classList.add('flex');
+
+                updateAdminTokenUI();
+                renderAdminStudentsTable();
+                renderAdminSessionsGrid();
+                showToast('Login Superadmin Berhasil', 'Selamat datang di Dashboard Kontrol SMADIWA EXAM - CBT.', 'success');
+            } else {
+                showToast('Login Gagal', 'Username atau password Superadmin tidak valid.', 'error');
+            }
+        }
+
+        function logoutAdmin() {
+            isAdminLoggedIn = false;
+            document.getElementById('view-admin-dashboard')?.classList.add('hidden');
+            document.getElementById('view-student-login')?.classList.remove('hidden');
+            document.getElementById('btn-open-admin-login')?.classList.remove('hidden');
+            const logoutBtn = document.getElementById('btn-admin-logout');
+            logoutBtn?.classList.add('hidden');
+            logoutBtn?.classList.remove('flex');
+            showToast('Keluar dari Superadmin', 'Anda telah kembali ke halaman portal peserta.', 'info');
+        }
+
+        function switchAdminTab(tabName) {
+            const monPanel = document.getElementById('admin-panel-monitoring');
+            const sesPanel = document.getElementById('admin-panel-sessions');
+            const monBtn = document.getElementById('tab-btn-monitoring');
+            const sesBtn = document.getElementById('tab-btn-sessions');
+
+            if (tabName === 'monitoring') {
+                monPanel?.classList.remove('hidden');
+                sesPanel?.classList.add('hidden');
+                monBtn.className = 'px-4 py-2 rounded-xl bg-blue-600 text-white text-xs sm:text-sm font-bold shadow transition cursor-pointer';
+                sesBtn.className = 'px-4 py-2 rounded-xl text-blue-200 hover:text-white text-xs sm:text-sm font-bold transition cursor-pointer';
+            } else {
+                monPanel?.classList.add('hidden');
+                sesPanel?.classList.remove('hidden');
+                sesBtn.className = 'px-4 py-2 rounded-xl bg-blue-600 text-white text-xs sm:text-sm font-bold shadow transition cursor-pointer';
+                monBtn.className = 'px-4 py-2 rounded-xl text-blue-200 hover:text-white text-xs sm:text-sm font-bold transition cursor-pointer';
+            }
+        }
+
+        async function saveSchoolRadiusSetting() {
+            const radInput = document.getElementById('admin-radius-input');
+            const val = Math.max(50, Math.min(5000, Number(radInput?.value) || 200));
+            state.settings.schoolRadiusMeters = val;
+            recalculateGeofenceStatus();
+
+            if (isCloudReady && db) {
+                try {
+                    await setDoc(getConfigDocRef(), { settings: { schoolRadiusMeters: val } }, { merge: true });
+                } catch (e) {
+                    console.error('Save radius error:', e);
+                }
+            }
+            showToast('Radius Diperbarui', `Radius geofencing sekolah disetel ke ${val} meter.`, 'success');
+        }
+
+        function renderAdminStudentsTable() {
+            const tbody = document.getElementById('admin-students-tbody');
+            if (!tbody) return;
+
+            const total = state.students.length;
+            const active = state.students.filter((s) => s.status === 'ACTIVE').length;
+            const locked = state.students.filter((s) => s.status === 'LOCKED').length;
+            const finished = state.students.filter((s) => s.status === 'FINISHED').length;
+
+            const setStat = (id, v) => {
+                const el = document.getElementById(id);
+                if (el) el.textContent = String(v);
+            };
+            setStat('stat-total', total);
+            setStat('stat-active', active);
+            setStat('stat-locked', locked);
+            setStat('stat-finished', finished);
+
+            const search = (document.getElementById('admin-search-student')?.value || '').toLowerCase();
+            const filterStatus = document.getElementById('admin-filter-status')?.value || 'ALL';
+            const filterJenjang = document.getElementById('admin-filter-jenjang')?.value || 'ALL';
+            const sortBy = document.getElementById('admin-sort-by')?.value || 'VIOLATION_DESC';
+
+            let list = state.students.filter((s) => {
+                const matchText = !search ||
+                    (s.name || '').toLowerCase().includes(search) ||
+                    (s.nis || '').toLowerCase().includes(search) ||
+                    (s.rombel || '').toLowerCase().includes(search);
+                const matchStatus = filterStatus === 'ALL' || s.status === filterStatus;
+                const matchJenjang = filterJenjang === 'ALL' || s.jenjang === filterJenjang;
+                return matchText && matchStatus && matchJenjang;
+            });
+
+            list.sort((a, b) => {
+                if (sortBy === 'VIOLATION_DESC') {
+                    const lockScoreA = a.status === 'LOCKED' ? 1000 : 0;
+                    const lockScoreB = b.status === 'LOCKED' ? 1000 : 0;
+                    return (lockScoreB + (b.violationCount || 0)) - (lockScoreA + (a.violationCount || 0));
+                }
+                if (sortBy === 'VIOLATION_COUNT') {
+                    return (b.violationCount || 0) - (a.violationCount || 0);
+                }
+                if (sortBy === 'TIME_DESC') {
+                    return new Date(b.lastActivity || 0).getTime() - new Date(a.lastActivity || 0).getTime();
+                }
+                if (sortBy === 'NAME_ASC') {
+                    return (a.name || '').localeCompare(b.name || '');
+                }
+                if (sortBy === 'JENJANG_ASC') {
+                    return (a.jenjang || '').localeCompare(b.jenjang || '');
+                }
+                return 0;
+            });
+
+            if (list.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="6" class="py-10 text-center text-slate-400 text-xs">
+                            <i class="fa-solid fa-inbox text-2xl mb-2 block"></i>
+                            Belum ada data peserta ujian yang sesuai filter.
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+
+            tbody.innerHTML = list.map((stu) => {
+                let statusBadge = `<span class="px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-700 text-xs font-bold">Mengerjakan</span>`;
+                if (stu.status === 'LOCKED') {
+                    statusBadge = `<span class="px-2.5 py-1 rounded-full bg-rose-100 text-rose-700 text-xs font-extrabold animate-pulse">TERKUNCI</span>`;
+                } else if (stu.status === 'FINISHED') {
+                    statusBadge = `<span class="px-2.5 py-1 rounded-full bg-indigo-100 text-indigo-700 text-xs font-bold">Selesai</span>`;
+                }
+
+                const vCount = stu.violationCount || 0;
+                const unlockBtn = stu.status === 'LOCKED'
+                    ? `<button onclick="unlockStudentAccess('${escapeHtml(stu.id)}')" class="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow cursor-pointer mr-1.5">
+                           <i class="fa-solid fa-lock-open mr-1"></i>Buka Akses
+                       </button>`
+                    : '';
+
+                return `
+                    <tr class="hover:bg-blue-50/50 transition ${stu.status === 'LOCKED' ? 'bg-rose-50/60' : ''}">
+                        <td class="py-3.5 px-4">
+                            <p class="font-bold text-slate-900">${escapeHtml(stu.name)}</p>
+                            <p class="text-xs font-mono text-slate-500">NIS: ${escapeHtml(stu.nis)}</p>
+                        </td>
+                        <td class="py-3.5 px-4">
+                            <span class="font-semibold text-slate-800">${escapeHtml(stu.jenjang)}</span>
+                            <p class="text-xs text-slate-500">${escapeHtml(stu.rombel)}</p>
+                        </td>
+                        <td class="py-3.5 px-4">
+                            <p class="font-semibold text-slate-800">${escapeHtml(stu.mapel)}</p>
+                            <p class="text-xs text-slate-500">${escapeHtml(stu.sessionName)}</p>
+                        </td>
+                        <td class="py-3.5 px-4">${statusBadge}</td>
+                        <td class="py-3.5 px-4">
+                            <span class="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-bold ${vCount > 0 ? 'bg-rose-100 text-rose-700' : 'bg-slate-100 text-slate-600'}">
+                                ${vCount}x Pelanggaran
+                            </span>
+                            <p class="text-[11px] text-slate-500 mt-0.5">${escapeHtml(stu.lastViolationReason || '-')}</p>
+                        </td>
+                        <td class="py-3.5 px-4 text-right whitespace-nowrap">
+                            ${unlockBtn}
+                            <button onclick="deleteStudentRecord('${escapeHtml(stu.id)}')" title="Hapus Data Peserta"
+                                class="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-rose-100 text-slate-600 hover:text-rose-600 text-xs font-bold transition cursor-pointer">
+                                <i class="fa-solid fa-trash"></i>
+                            </button>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        async function unlockStudentAccess(studentId) {
+            const updates = {
+                status: 'ACTIVE',
+                lastActivity: new Date().toISOString()
+            };
+            if (isCloudReady && db) {
+                try {
+                    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'students', studentId), updates);
+                } catch (e) {
+                    console.error('Unlock error:', e);
+                }
+            } else {
+                const idx = state.students.findIndex((s) => s.id === studentId);
+                if (idx >= 0) Object.assign(state.students[idx], updates);
+                renderAdminStudentsTable();
+            }
+            showToast('Akses Peserta Dibuka', 'Peserta kini dapat memasukkan token terbaru untuk melanjutkan ujian.', 'success');
+        }
+
+        async function deleteStudentRecord(studentId) {
+            if (isCloudReady && db) {
+                try {
+                    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'students', studentId));
+                } catch (e) {
+                    console.error('Delete student error:', e);
+                }
+            } else {
+                state.students = state.students.filter((s) => s.id !== studentId);
+                renderAdminStudentsTable();
+            }
+            showToast('Data Dihapus', 'Catatan aktivitas peserta telah dihapus.', 'info');
+        }
+
+        async function simulateStudentViolationDemo() {
+            const demoId = 'demo_20269999_sess-x-1';
+            const demoStudent = {
+                id: demoId,
+                name: 'Budi Santoso (Simulasi)',
+                nis: '20269999',
+                jenjang: 'Kelas X',
+                rombel: 'X MIPA 2',
+                sessionId: 'sess-x-1',
+                sessionName: 'Sesi 1 - Pagi',
+                mapel: 'Matematika Wajib',
+                status: 'LOCKED',
+                violationCount: 2,
+                lastViolationReason: 'Simulasi Pindah Tab / Split Screen',
+                lastActivity: new Date().toISOString()
+            };
+
+            if (isCloudReady && db) {
+                try {
+                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'students', demoId), demoStudent, { merge: true });
+                } catch (e) {
+                    console.error('Demo violation error:', e);
+                }
+            } else {
+                const idx = state.students.findIndex((s) => s.id === demoId);
+                if (idx >= 0) state.students[idx] = demoStudent;
+                else state.students.push(demoStudent);
+                renderAdminStudentsTable();
+            }
+            showToast('Simulasi Pelanggaran Ditambahkan', 'Contoh siswa terkunci muncul di tabel monitoring.', 'warning');
+        }
+
+        // ==========================================
+        // 9. ADMIN SESSION & SUBJECT CRUD
+        // ==========================================
+        function renderAdminSessionsGrid() {
+            const grid = document.getElementById('admin-sessions-grid');
+            if (!grid) return;
+
+            if (state.sessions.length === 0) {
+                grid.innerHTML = `<div class="col-span-full text-center py-8 text-slate-400 text-xs">Belum ada jadwal sesi ujian. Klik "Tambah Sesi / Mapel Baru".</div>`;
+                return;
+            }
+
+            grid.innerHTML = state.sessions.map((sess) => `
+                <div class="rounded-2xl border border-slate-200 bg-slate-50/80 p-5 flex flex-col justify-between gap-4 hover:border-blue-400 transition">
+                    <div>
+                        <div class="flex items-center justify-between gap-2 mb-2">
+                            <span class="px-2.5 py-0.5 rounded-full bg-blue-100 text-blue-800 text-xs font-extrabold">${escapeHtml(sess.jenjang)}</span>
+                            <span class="text-xs font-semibold text-slate-500">${escapeHtml(sess.name)}</span>
+                        </div>
+                        <h4 class="text-base font-extrabold text-slate-900 mb-2">${escapeHtml(sess.mapel)}</h4>
+                        <div class="space-y-1 text-xs text-slate-600">
+                            <p><i class="fa-regular fa-calendar-plus text-emerald-600 mr-1.5"></i>Mulai: <strong>${formatDateTimeID(sess.start)}</strong></p>
+                            <p><i class="fa-regular fa-calendar-xmark text-rose-600 mr-1.5"></i>Selesai: <strong>${formatDateTimeID(sess.end)}</strong></p>
+                        </div>
+                    </div>
+                    <div class="flex items-center justify-end gap-2 pt-3 border-t border-slate-200">
+                        <button onclick="openSessionModal('${escapeHtml(sess.id)}')"
+                            class="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold cursor-pointer">
+                            <i class="fa-solid fa-pen-to-square mr-1"></i>Edit
+                        </button>
+                        <button onclick="deleteSessionData('${escapeHtml(sess.id)}')"
+                            class="px-3 py-1.5 rounded-xl bg-rose-100 hover:bg-rose-200 text-rose-700 text-xs font-bold cursor-pointer">
+                            <i class="fa-solid fa-trash mr-1"></i>Hapus
+                        </button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function openSessionModal(sessionId = null) {
+            const modal = document.getElementById('modal-session-form');
+            const titleEl = document.getElementById('session-modal-title');
+            const idInput = document.getElementById('edit-session-id');
+
+            if (sessionId) {
+                const sess = state.sessions.find((s) => s.id === sessionId);
+                if (!sess) return;
+                titleEl.textContent = 'Edit Sesi & Mapel Ujian';
+                idInput.value = sess.id;
+                document.getElementById('sess-jenjang').value = sess.jenjang;
+                document.getElementById('sess-name').value = sess.name;
+                document.getElementById('sess-mapel').value = sess.mapel;
+                document.getElementById('sess-start').value = sess.start;
+                document.getElementById('sess-end').value = sess.end;
+                document.getElementById('sess-gform').value = sess.gform;
+            } else {
+                titleEl.textContent = 'Tambah Sesi & Mapel Ujian';
+                idInput.value = '';
+                document.getElementById('session-crud-form').reset();
+            }
+            modal?.classList.remove('hidden');
+        }
+
+        function closeSessionModal() {
+            document.getElementById('modal-session-form')?.classList.add('hidden');
+        }
+
+        async function saveSessionData(event) {
+            event.preventDefault();
+            const existingId = document.getElementById('edit-session-id').value;
+            const id = existingId || `sess-${Date.now()}`;
+
+            let gformUrl = document.getElementById('sess-gform').value.trim();
+            if (gformUrl.includes('docs.google.com/forms') && !gformUrl.includes('embedded=true')) {
+                gformUrl += (gformUrl.includes('?') ? '&' : '?') + 'embedded=true';
+            }
+
+            const payload = {
+                id,
+                jenjang: document.getElementById('sess-jenjang').value,
+                name: document.getElementById('sess-name').value.trim(),
+                mapel: document.getElementById('sess-mapel').value.trim(),
+                start: document.getElementById('sess-start').value,
+                end: document.getElementById('sess-end').value,
+                gform: gformUrl
+            };
+
+            if (isCloudReady && db) {
+                try {
+                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'sessions', id), payload, { merge: true });
+                } catch (e) {
+                    console.error('Save session error:', e);
+                }
+            } else {
+                const idx = state.sessions.findIndex((s) => s.id === id);
+                if (idx >= 0) state.sessions[idx] = payload;
+                else state.sessions.push(payload);
+                populateAvailableSessions();
+                renderAdminSessionsGrid();
+            }
+
+            closeSessionModal();
+            showToast('Jadwal Tersimpan', `Mapel ${payload.mapel} (${payload.jenjang}) berhasil disimpan.`, 'success');
+        }
+
+        async function deleteSessionData(sessionId) {
+            if (isCloudReady && db) {
+                try {
+                    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'sessions', sessionId));
+                } catch (e) {
+                    console.error('Delete session error:', e);
+                }
+            } else {
+                state.sessions = state.sessions.filter((s) => s.id !== sessionId);
+                populateAvailableSessions();
+                renderAdminSessionsGrid();
+            }
+            showToast('Sesi Dihapus', 'Jadwal sesi ujian telah dihapus.', 'info');
+        }
+
+        // ==========================================
+        // 10. EXPOSE HANDLERS TO WINDOW & BOOTSTRAP
+        // ==========================================
+        Object.assign(window, {
+            openGeoHelperModal,
+            checkRealGeolocation,
+            toggleSimulatedLocation,
+            populateAvailableSessions,
+            updateSelectedSessionInfo,
+            handleStudentStartExam,
+            confirmFinishExam,
+            reloadExamIframe,
+            checkUnlockStatusFromAdmin,
+            openAdminLoginModal,
+            closeAdminLoginModal,
+            handleAdminLogin,
+            logoutAdmin,
+            changeTokenInterval,
+            forceGenerateNewToken,
+            saveSchoolRadiusSetting,
+            simulateStudentViolationDemo,
+            switchAdminTab,
+            renderAdminStudentsTable,
+            unlockStudentAccess,
+            deleteStudentRecord,
+            openSessionModal,
+            closeSessionModal,
+            saveSessionData,
+            deleteSessionData
+        });
+
+        function bootstrapApp() {
+            startHeaderClock();
+            checkRealGeolocation();
+            setupAntiCheatListeners();
+            populateAvailableSessions();
+            startTokenRotationWatcher();
+            initFirebaseAndData();
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', bootstrapApp);
+        } else {
+            bootstrapApp();
+        }
+    </script>
+</body>
+</html>
